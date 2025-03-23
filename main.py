@@ -2,7 +2,7 @@
 Faculty Matching API
 
 A FastAPI service that provides endpoints for faculty search,
-resume upload, and compatibility scoring with JWT authentication.
+resume upload, and compatibility scoring with JWT authentication and rate limiting.
 """
 
 import os
@@ -11,6 +11,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Query, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel, Field, EmailStr
 import json
 import logging
@@ -27,6 +28,15 @@ from auth import (
     create_user, ACCESS_TOKEN_EXPIRE_MINUTES
 )
 
+# Import rate limiting module
+from limiter import (
+    setup_limiter, 
+    rate_limit_public, 
+    rate_limit_user, 
+    rate_limit_admin, 
+    get_rate_limiter_by_role
+)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -37,8 +47,8 @@ logger = logging.getLogger(__name__)
 # Create the FastAPI app
 app = FastAPI(
     title="Faculty Matching API",
-    description="API for faculty search, resume upload, and compatibility scoring",
-    version="1.0.0"
+    description="API for faculty search, resume upload, and compatibility scoring with rate limiting",
+    version="1.1.0"
 )
 
 # Add CORS middleware
@@ -195,12 +205,17 @@ def calculate_compatibility(resume_data, faculty):
         "overall_score": round(overall_score, 2)
     }
 
+# Setup rate limiter on startup
+@app.on_event("startup")
+async def startup_event():
+    await setup_limiter(app)
+
 # Define API endpoints
-@app.get("/")
+@app.get("/", dependencies=[Depends(rate_limit_public())])
 async def root():
     return {"message": "Welcome to the Faculty Matching API"}
 
-@app.get("/health")
+@app.get("/health", dependencies=[Depends(rate_limit_public())])
 async def health_check():
     return {
         "status": "healthy",
@@ -209,7 +224,7 @@ async def health_check():
     }
 
 # Authentication endpoints
-@app.post("/token", response_model=Token)
+@app.post("/token", response_model=Token, dependencies=[Depends(rate_limit_public())])
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     """
     Obtain JWT access token for authentication.
@@ -231,7 +246,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.post("/users/", response_model=User)
+@app.post("/users/", response_model=User, dependencies=[Depends(rate_limit_admin())])
 async def register_user(user: UserCreate, current_user: User = Depends(get_current_admin_user)):
     """
     Register a new user (admin only).
@@ -245,7 +260,7 @@ async def register_user(user: UserCreate, current_user: User = Depends(get_curre
     
     return created_user
 
-@app.get("/users/me/", response_model=User)
+@app.get("/users/me/", response_model=User, dependencies=[Depends(rate_limit_user())])
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     """
     Get current user information.
@@ -253,7 +268,7 @@ async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return current_user
 
 # Protected faculty endpoints
-@app.post("/faculty/search", response_model=List[Faculty])
+@app.post("/faculty/search", response_model=List[Faculty], dependencies=[Depends(rate_limit_user())])
 async def search_faculty(
     query: SearchQuery = Body(...),
     current_user: User = Depends(get_current_active_user)
@@ -264,7 +279,7 @@ async def search_faculty(
     filtered = filter_faculty(faculty_db, query)
     return filtered
 
-@app.get("/faculty/{faculty_id}", response_model=Faculty)
+@app.get("/faculty/{faculty_id}", response_model=Faculty, dependencies=[Depends(rate_limit_user())])
 async def get_faculty(
     faculty_id: str,
     current_user: User = Depends(get_current_active_user)
@@ -277,7 +292,7 @@ async def get_faculty(
             return faculty
     raise HTTPException(status_code=404, detail="Faculty not found")
 
-@app.post("/faculty", response_model=Faculty)
+@app.post("/faculty", response_model=Faculty, dependencies=[Depends(rate_limit_admin())])
 async def create_faculty(
     faculty: Faculty,
     current_user: User = Depends(get_current_admin_user)
@@ -296,7 +311,7 @@ async def create_faculty(
     
     return faculty_dict
 
-@app.post("/resume/upload")
+@app.post("/resume/upload", dependencies=[Depends(rate_limit_user())])
 async def upload_resume(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_active_user)
@@ -329,7 +344,7 @@ async def upload_resume(
         "message": "Resume uploaded successfully. Call /resume/parse with this filename to extract data."
     }
 
-@app.post("/resume/parse", response_model=ResumeData)
+@app.post("/resume/parse", response_model=ResumeData, dependencies=[Depends(rate_limit_user())])
 async def parse_resume(
     filename: str = Body(..., embed=True),
     current_user: User = Depends(get_current_active_user)
@@ -365,7 +380,7 @@ async def parse_resume(
     
     return mock_resume_data
 
-@app.post("/match", response_model=List[MatchResult])
+@app.post("/match", response_model=List[MatchResult], dependencies=[Depends(rate_limit_user())])
 async def match_resume_with_faculty(
     resume_data: ResumeData = Body(...),
     top_k: int = Query(5, ge=1, le=20, description="Number of top matches to return"),
